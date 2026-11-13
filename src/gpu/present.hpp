@@ -93,6 +93,11 @@ public:
     // texture (width x height pixels): the menu.
     std::function<void(SDL_GPUCommandBuffer*, SDL_GPUTexture*, uint32_t, uint32_t)> overlay;
 
+    // A translucent 0xAARRGGBB picture (touch controls) drawn over the swapchain with alpha blend.
+    // Call from `overlay` after the menu. pixels size must be width*height.
+    void draw_overlay_rgba(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* swapchain, uint32_t sw, uint32_t sh,
+                           std::span<const uint32_t> pixels, int width, int height);
+
     // A screenshot (F12): the next picture also drawn, as the window draws it (its looks, its shape) but without
     // the overlay, at width x height, and read back; take_capture gives it (0xAARRGGBB), once.
     void request_capture(int width, int height) { capture_width_ = width, capture_height_ = height; }
@@ -112,10 +117,13 @@ private:
               int extend = 0);
 
     Device* device_ = nullptr;
-    SDL_GPUGraphicsPipeline *pipeline_ = nullptr, *screen_pipeline_ = nullptr;
+    SDL_GPUGraphicsPipeline *pipeline_ = nullptr, *screen_pipeline_ = nullptr, *overlay_pipeline_ = nullptr;
     SDL_GPUSampler *sampler_ = nullptr, *smooth_ = nullptr; // nearest; linear with mipmaps (the 3D)
     SDL_GPUTexture* textures_[2] = {}; // the frame, or the layers below and above the 3D
     SDL_GPUTransferBuffer* upload_ = nullptr;
+    SDL_GPUTexture* overlay_tex_ = nullptr;
+    SDL_GPUTransferBuffer* overlay_upload_ = nullptr;
+    int overlay_w_ = 0, overlay_h_ = 0;
     int width_ = 0, height_ = 0;
     SDL_GPUTexture* target_ = nullptr;
     float shift_[2] = {}; // present_layers' shift, for draw

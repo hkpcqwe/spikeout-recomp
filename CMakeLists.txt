@@ -271,22 +271,42 @@ add_library(recomp_lifter src/recomp/lifter.cpp)
 target_include_directories(recomp_lifter PUBLIC src)
 target_link_libraries(recomp_lifter PUBLIC analysis PRIVATE spikeout_warnings)
 
-add_executable(ppcdis tools/ppcdis.cpp)
-target_link_libraries(ppcdis PRIVATE ppc spikeout_warnings)
+if(SPIKEOUT_TOOLS)
+    add_executable(ppcdis tools/ppcdis.cpp)
+    target_link_libraries(ppcdis PRIVATE ppc spikeout_warnings)
 
-add_executable(romcheck tools/romcheck.cpp)
-target_link_libraries(romcheck PRIVATE m3runtime spikeout_warnings)
+    add_executable(romcheck tools/romcheck.cpp)
+    target_link_libraries(romcheck PRIVATE m3runtime spikeout_warnings)
 
-add_executable(codemap tools/codemap.cpp)
-target_link_libraries(codemap PRIVATE analysis spikeout_warnings)
+    add_executable(codemap tools/codemap.cpp)
+    target_link_libraries(codemap PRIVATE analysis spikeout_warnings)
 
-add_executable(ppcrecomp tools/ppcrecomp.cpp)
-target_link_libraries(ppcrecomp PRIVATE recomp_lifter spikeout_warnings)
+    add_executable(ppcrecomp tools/ppcrecomp.cpp)
+    target_link_libraries(ppcrecomp PRIVATE recomp_lifter spikeout_warnings)
+endif()
 
 # SDL3, for the window and the GPU renderer: from the system if CMake finds
 # it, otherwise downloaded and built with the project (zlib license).
 option(SPIKEOUT_FRONTEND "Build the spikeout window (SDL3)" ON)
 option(SPIKEOUT_GPU "Build the GPU renderer (SDL GPU: Vulkan, Metal)" ON)
+option(SPIKEOUT_TOOLS "Build command-line tools (ppcrecomp, romcheck, gamerun, ...)" ON)
+option(SPIKEOUT_INTERP "Build gamerun-interp / spikeout-interp (pre-decoded interpreter)" ON)
+# iOS: interpreter window only (no JIT), no lobby OpenSSL, no host CLIs, no tests.
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    set(SPIKEOUT_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(SPIKEOUT_LOBBY OFF CACHE BOOL "" FORCE)
+    set(SPIKEOUT_LLVM_JIT OFF CACHE BOOL "" FORCE)
+    set(SPIKEOUT_TOOLS OFF CACHE BOOL "" FORCE)
+    set(SPIKEOUT_FRONTEND ON CACHE BOOL "" FORCE)
+    set(SPIKEOUT_GPU ON CACHE BOOL "" FORCE)
+    set(SPIKEOUT_INTERP ON CACHE BOOL "" FORCE)
+    set(CMAKE_XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "com.spikeout.recomp" CACHE STRING "")
+    set(CMAKE_XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2" CACHE STRING "") # iPhone + iPad
+    # 16.3+: libc++'s std::format needs floating to_chars (used by ppc/disasm.cpp).
+    if(NOT CMAKE_OSX_DEPLOYMENT_TARGET OR CMAKE_OSX_DEPLOYMENT_TARGET VERSION_LESS "16.3")
+        set(CMAKE_OSX_DEPLOYMENT_TARGET "16.3" CACHE STRING "" FORCE)
+    endif()
+endif()
 include(FetchContent)
 if(SPIKEOUT_FRONTEND OR SPIKEOUT_GPU)
     find_package(SDL3 CONFIG QUIET)
@@ -295,6 +315,9 @@ if(SPIKEOUT_FRONTEND OR SPIKEOUT_GPU)
         set(SDL_STATIC ON CACHE BOOL "" FORCE)
         set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
         set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
+        if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+            set(SDL_PEN OFF CACHE BOOL "" FORCE)
+        endif()
         FetchContent_Declare(SDL3
             GIT_REPOSITORY https://github.com/libsdl-org/SDL.git
             GIT_TAG release-3.4.16
@@ -330,79 +353,126 @@ function(spikeout_window_app target)
         target_sources(${target} PRIVATE ${CMAKE_SOURCE_DIR}/assets/icon/spikeout.rc)
         target_link_libraries(${target} PRIVATE dbghelp) # (tools/player_report.hpp: a crash's minidump)
     endif()
+    if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+        set_target_properties(${target} PROPERTIES
+            MACOSX_BUNDLE TRUE
+            MACOSX_BUNDLE_INFO_PLIST ${CMAKE_SOURCE_DIR}/ios/Info.plist
+            XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "com.spikeout.recomp"
+            XCODE_ATTRIBUTE_PRODUCT_NAME "Spikeout"
+            XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"
+            XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET "${CMAKE_OSX_DEPLOYMENT_TARGET}"
+            XCODE_ATTRIBUTE_CLANG_ENABLE_OBJC_ARC YES
+            XCODE_ATTRIBUTE_ENABLE_BITCODE NO
+            XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "Apple Development"
+            XCODE_ATTRIBUTE_CODE_SIGN_STYLE "Automatic"
+            XCODE_ATTRIBUTE_DEVELOPMENT_TEAM "${SPIKEOUT_IOS_TEAM}"
+            XCODE_ATTRIBUTE_ASSETCATALOG_COMPILER_APPICON_NAME "AppIcon")
+        if(EXISTS ${CMAKE_SOURCE_DIR}/assets/icon/icon.png)
+            set_source_files_properties(${CMAKE_SOURCE_DIR}/assets/icon/icon.png PROPERTIES
+                MACOSX_PACKAGE_LOCATION Resources)
+            target_sources(${target} PRIVATE ${CMAKE_SOURCE_DIR}/assets/icon/icon.png)
+        endif()
+    endif()
 endfunction()
+set(SPIKEOUT_IOS_TEAM "" CACHE STRING "Apple Developer Team ID for iOS code signing (empty: Xcode/automatic)")
 
 # The GPU renderer. Its shaders (src/gpu/shaders, GLSL) are compiled at build
 # time to SPIR-V for Vulkan with glslang (BSD-3-Clause and others) and to
 # Metal source with SPIRV-Cross (Apache-2.0), both downloaded as build tools.
+# Cross builds (iOS): set SPIKEOUT_PREBUILT_SHADERS to a host build's shaders/
+# folder (tools/ios-build.sh does this) so glslang need not run on-device.
 if(SPIKEOUT_GPU)
-    set(ENABLE_OPT OFF CACHE BOOL "" FORCE)
-    set(ENABLE_GLSLANG_BINARIES ON CACHE BOOL "" FORCE)
-    set(GLSLANG_TESTS OFF CACHE BOOL "" FORCE)
-    set(GLSLANG_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
-    set(ENABLE_HLSL OFF CACHE BOOL "" FORCE)
-    set(ENABLE_SPVREMAPPER OFF CACHE BOOL "" FORCE)
-    FetchContent_Declare(glslang
-        GIT_REPOSITORY https://github.com/KhronosGroup/glslang.git
-        GIT_TAG 16.4.0
-        GIT_SHALLOW TRUE)
-    set(SPIRV_CROSS_CLI ON CACHE BOOL "" FORCE)
-    foreach(part GLSL HLSL MSL CPP REFLECT UTIL) # the command-line tool needs them all
-        set(SPIRV_CROSS_ENABLE_${part} ON CACHE BOOL "" FORCE)
-    endforeach()
-    set(SPIRV_CROSS_STATIC ON CACHE BOOL "" FORCE)
-    set(SPIRV_CROSS_SHARED OFF CACHE BOOL "" FORCE)
-    set(SPIRV_CROSS_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
-    set(SPIRV_CROSS_ENABLE_C_API OFF CACHE BOOL "" FORCE)
-    set(SPIRV_CROSS_SKIP_INSTALL ON CACHE BOOL "" FORCE)
-    FetchContent_Declare(spirv_cross
-        GIT_REPOSITORY https://github.com/KhronosGroup/SPIRV-Cross.git
-        GIT_TAG vulkan-sdk-1.4.350.0
-        GIT_SHALLOW TRUE)
-    FetchContent_MakeAvailable(glslang spirv_cross)
-
     set(shader_dir ${CMAKE_SOURCE_DIR}/src/gpu/shaders)
     set(shader_out ${CMAKE_BINARY_DIR}/shaders)
     file(MAKE_DIRECTORY ${shader_out})
     # FILE, or FILE@DEFINE@...: a variant built with those defines set,
     # named file_define..._stage (scene.frag@OPAQUE -> scene_opaque_frag).
     set(shaders present.vert present.frag scene.vert scene.frag scene.frag@OPAQUE scene.frag@QUADS
-        scene.frag@OPAQUE@QUADS scene.frag@QUADS@BOUNDED scene.frag@OPAQUE@QUADS@BOUNDED background_fog.frag composite.frag screen.frag)
+        scene.frag@OPAQUE@QUADS scene.frag@QUADS@BOUNDED scene.frag@OPAQUE@QUADS@BOUNDED background_fog.frag composite.frag
+        screen.frag overlay.frag)
     file(GLOB shader_includes ${shader_dir}/*.glsl)
     set(shader_sources)
-    foreach(entry ${shaders})
-        string(REPLACE "@" ";" parts ${entry})
-        list(GET parts 0 shader)
-        string(REGEX REPLACE "\\.(vert|frag)$" "" base ${shader})
-        string(REGEX MATCH "(vert|frag)$" stage ${shader})
-        set(defines)
-        set(name ${base})
-        list(REMOVE_AT parts 0)
-        foreach(define ${parts})
-            list(APPEND defines -D${define})
-            string(TOLOWER ${define} lower)
-            set(name ${name}_${lower})
+    set(SPIKEOUT_PREBUILT_SHADERS "" CACHE PATH "Host-built shaders/*.cpp to reuse when cross-compiling (iOS)")
+    if(SPIKEOUT_PREBUILT_SHADERS)
+        foreach(entry ${shaders})
+            string(REPLACE "@" ";" parts ${entry})
+            list(GET parts 0 shader)
+            string(REGEX REPLACE "\\.(vert|frag)$" "" base ${shader})
+            string(REGEX MATCH "(vert|frag)$" stage ${shader})
+            set(name ${base})
+            list(REMOVE_AT parts 0)
+            foreach(define ${parts})
+                string(TOLOWER ${define} lower)
+                set(name ${name}_${lower})
+            endforeach()
+            set(name ${name}_${stage})
+            set(prebuilt ${SPIKEOUT_PREBUILT_SHADERS}/${name}.cpp)
+            if(NOT EXISTS ${prebuilt})
+                message(FATAL_ERROR "SPIKEOUT_PREBUILT_SHADERS missing ${name}.cpp (build shaders on the host first)")
+            endif()
+            list(APPEND shader_sources ${prebuilt})
         endforeach()
-        set(name ${name}_${stage})
-        set(spv ${shader_out}/${name}.spv)
-        set(metal_spv ${shader_out}/${name}_metal.spv) # (with METAL: Metal's binding numbers)
-        set(msl ${shader_out}/${name}.msl)
-        set(cpp ${shader_out}/${name}.cpp)
-        add_custom_command(
-            OUTPUT ${cpp}
-            COMMAND $<TARGET_FILE:glslang-standalone> -V --target-env vulkan1.0 -I${shader_dir} ${defines}
-                    -o ${spv} ${shader_dir}/${shader}
-            COMMAND $<TARGET_FILE:glslang-standalone> -V --target-env vulkan1.0 -I${shader_dir} ${defines} -DMETAL
-                    -o ${metal_spv} ${shader_dir}/${shader}
-            COMMAND $<TARGET_FILE:spirv-cross> ${metal_spv} --msl --msl-version 20100 --msl-decoration-binding --output ${msl}
-            COMMAND ${CMAKE_COMMAND} -DNAME=${name} -DSPV=${spv} -DMSL=${msl} -DOUT=${cpp}
-                    -P ${CMAKE_SOURCE_DIR}/cmake/embed_shader.cmake
-            DEPENDS ${shader_dir}/${shader} ${shader_includes} ${CMAKE_SOURCE_DIR}/cmake/embed_shader.cmake
-                    glslang-standalone spirv-cross
-            COMMENT "Compiling shader ${name}"
-            VERBATIM)
-        list(APPEND shader_sources ${cpp})
-    endforeach()
+        message(STATUS "GPU shaders: reusing ${SPIKEOUT_PREBUILT_SHADERS}")
+    else()
+        set(ENABLE_OPT OFF CACHE BOOL "" FORCE)
+        set(ENABLE_GLSLANG_BINARIES ON CACHE BOOL "" FORCE)
+        set(GLSLANG_TESTS OFF CACHE BOOL "" FORCE)
+        set(GLSLANG_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+        set(ENABLE_HLSL OFF CACHE BOOL "" FORCE)
+        set(ENABLE_SPVREMAPPER OFF CACHE BOOL "" FORCE)
+        FetchContent_Declare(glslang
+            GIT_REPOSITORY https://github.com/KhronosGroup/glslang.git
+            GIT_TAG 16.4.0
+            GIT_SHALLOW TRUE)
+        set(SPIRV_CROSS_CLI ON CACHE BOOL "" FORCE)
+        foreach(part GLSL HLSL MSL CPP REFLECT UTIL) # the command-line tool needs them all
+            set(SPIRV_CROSS_ENABLE_${part} ON CACHE BOOL "" FORCE)
+        endforeach()
+        set(SPIRV_CROSS_STATIC ON CACHE BOOL "" FORCE)
+        set(SPIRV_CROSS_SHARED OFF CACHE BOOL "" FORCE)
+        set(SPIRV_CROSS_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
+        set(SPIRV_CROSS_ENABLE_C_API OFF CACHE BOOL "" FORCE)
+        set(SPIRV_CROSS_SKIP_INSTALL ON CACHE BOOL "" FORCE)
+        FetchContent_Declare(spirv_cross
+            GIT_REPOSITORY https://github.com/KhronosGroup/SPIRV-Cross.git
+            GIT_TAG vulkan-sdk-1.4.350.0
+            GIT_SHALLOW TRUE)
+        FetchContent_MakeAvailable(glslang spirv_cross)
+
+        foreach(entry ${shaders})
+            string(REPLACE "@" ";" parts ${entry})
+            list(GET parts 0 shader)
+            string(REGEX REPLACE "\\.(vert|frag)$" "" base ${shader})
+            string(REGEX MATCH "(vert|frag)$" stage ${shader})
+            set(defines)
+            set(name ${base})
+            list(REMOVE_AT parts 0)
+            foreach(define ${parts})
+                list(APPEND defines -D${define})
+                string(TOLOWER ${define} lower)
+                set(name ${name}_${lower})
+            endforeach()
+            set(name ${name}_${stage})
+            set(spv ${shader_out}/${name}.spv)
+            set(metal_spv ${shader_out}/${name}_metal.spv) # (with METAL: Metal's binding numbers)
+            set(msl ${shader_out}/${name}.msl)
+            set(cpp ${shader_out}/${name}.cpp)
+            add_custom_command(
+                OUTPUT ${cpp}
+                COMMAND $<TARGET_FILE:glslang-standalone> -V --target-env vulkan1.0 -I${shader_dir} ${defines}
+                        -o ${spv} ${shader_dir}/${shader}
+                COMMAND $<TARGET_FILE:glslang-standalone> -V --target-env vulkan1.0 -I${shader_dir} ${defines} -DMETAL
+                        -o ${metal_spv} ${shader_dir}/${shader}
+                COMMAND $<TARGET_FILE:spirv-cross> ${metal_spv} --msl --msl-version 20100 --msl-decoration-binding --output ${msl}
+                COMMAND ${CMAKE_COMMAND} -DNAME=${name} -DSPV=${spv} -DMSL=${msl} -DOUT=${cpp}
+                        -P ${CMAKE_SOURCE_DIR}/cmake/embed_shader.cmake
+                DEPENDS ${shader_dir}/${shader} ${shader_includes} ${CMAKE_SOURCE_DIR}/cmake/embed_shader.cmake
+                        glslang-standalone spirv-cross
+                COMMENT "Compiling shader ${name}"
+                VERBATIM)
+            list(APPEND shader_sources ${cpp})
+        endforeach()
+    endif()
 
     # The in-game menu: RmlUi (MIT) with FreeType (FreeType License) for its
     # text, drawn through RmlUi's SDL GPU renderer (third_party/rmlui_sdl_gpu).
@@ -480,11 +550,13 @@ if(SPIKEOUT_GPU)
 endif()
 
 # frame3d: a 3D frame dump drawn by our renderers, to compare with Supermodel's (docs/frame-dump.md).
-add_executable(frame3d tools/frame3d.cpp)
-target_link_libraries(frame3d PRIVATE m3runtime spikeout_warnings)
-if(SPIKEOUT_GPU)
-    target_link_libraries(frame3d PRIVATE m3gpu)
-    target_compile_definitions(frame3d PRIVATE SPIKEOUT_GPU)
+if(SPIKEOUT_TOOLS)
+    add_executable(frame3d tools/frame3d.cpp)
+    target_link_libraries(frame3d PRIVATE m3runtime spikeout_warnings)
+    if(SPIKEOUT_GPU)
+        target_link_libraries(frame3d PRIVATE m3gpu)
+        target_compile_definitions(frame3d PRIVATE SPIKEOUT_GPU)
+    endif()
 endif()
 
 # Code generated from ROM data goes here, never into the source tree.
@@ -495,7 +567,7 @@ file(MAKE_DIRECTORY ${SPIKEOUT_GENERATED_DIR})
 # recompiles the boot ROM and adds a test that runs it.
 set(SPIKEOUT_ROM_DIR "" CACHE PATH "Folder with the unzipped spikeofe ROM set (enables the boot ROM test)")
 
-if(SPIKEOUT_ROM_DIR)
+if(SPIKEOUT_ROM_DIR AND SPIKEOUT_TOOLS)
     # The boot ROM (fixed CROM code, run from reset).
     set(boot_rom_cpp ${SPIKEOUT_GENERATED_DIR}/boot_rom.cpp)
     add_custom_command(
@@ -560,19 +632,54 @@ if(SPIKEOUT_ROM_DIR)
     endif()
 endif()
 
-# Prototype: gamerun-interp, the game run from the player's ROM by a
-# pre-decoded interpreter (src/interp): no machine code made at all (for
-# systems with no JIT, iOS), no recompiled code built in.
-option(SPIKEOUT_INTERP "Build gamerun-interp (pre-decoded interpreter prototype)" ON)
+# Prototype: gamerun-interp / spikeout-interp, the game run from the player's
+# ROM by a pre-decoded interpreter (src/interp): no machine code made at all
+# (for systems with no JIT, iOS), no recompiled code built in.
 if(SPIKEOUT_INTERP)
     add_library(spikeout_interp src/interp/interp.cpp)
     target_link_libraries(spikeout_interp PUBLIC recomp_runtime analysis PRIVATE spikeout_warnings)
-    add_executable(gamerun-interp tools/gamerun.cpp)
-    target_link_libraries(gamerun-interp PRIVATE spikeout_interp m3net spikeout_warnings)
-    target_compile_definitions(gamerun-interp PRIVATE SPIKEOUT_INTERP)
-    if(SPIKEOUT_GPU)
-        target_link_libraries(gamerun-interp PRIVATE m3gpu)
-        target_compile_definitions(gamerun-interp PRIVATE SPIKEOUT_GPU)
+    if(SPIKEOUT_TOOLS)
+        add_executable(gamerun-interp tools/gamerun.cpp)
+        target_link_libraries(gamerun-interp PRIVATE spikeout_interp m3net spikeout_warnings)
+        target_compile_definitions(gamerun-interp PRIVATE SPIKEOUT_INTERP)
+        if(SPIKEOUT_GPU)
+            target_link_libraries(gamerun-interp PRIVATE m3gpu)
+            target_compile_definitions(gamerun-interp PRIVATE SPIKEOUT_GPU)
+        endif()
+    endif()
+    # The window with the interpreter (iOS and other no-JIT systems).
+    if(SPIKEOUT_FRONTEND)
+        add_executable(spikeout-interp tools/spikeout.cpp)
+        target_link_libraries(spikeout-interp PRIVATE spikeout_interp m3net SDL3::SDL3 spikeout_warnings)
+        spikeout_window_app(spikeout-interp)
+        target_compile_definitions(spikeout-interp PRIVATE SPIKEOUT_INTERP)
+        if(SPIKEOUT_GPU)
+            target_link_libraries(spikeout-interp PRIVATE m3gpu m3ui)
+            target_compile_definitions(spikeout-interp PRIVATE SPIKEOUT_GPU)
+        endif()
+        if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+            # Bundle the player's ROM set into the app for sideload / Simulator testing
+            # (SPIKEOUT_IOS_ROM_DIR). Never commit ROM data; App Store builds leave this empty.
+            set(SPIKEOUT_IOS_ROM_DIR "" CACHE PATH "Optional spikeofe folder/zip copied into the iOS app Resources")
+            if(SPIKEOUT_IOS_ROM_DIR)
+                # TARGET_FILE_DIR is the .app root on iOS (PRODUCT_NAME may differ from the target name).
+                # TARGET_BUNDLE_DIR follows PRODUCT_NAME (Spikeout.app); TARGET_FILE_DIR
+                # can wrongly expand to spikeout-interp.app under the Xcode generator.
+                if(IS_DIRECTORY "${SPIKEOUT_IOS_ROM_DIR}")
+                    add_custom_command(TARGET spikeout-interp POST_BUILD
+                        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                            "${SPIKEOUT_IOS_ROM_DIR}"
+                            "$<TARGET_BUNDLE_DIR:spikeout-interp>/spikeofe"
+                        COMMENT "Bundling spikeofe ROM folder into the iOS app")
+                else()
+                    add_custom_command(TARGET spikeout-interp POST_BUILD
+                        COMMAND ${CMAKE_COMMAND} -E copy
+                            "${SPIKEOUT_IOS_ROM_DIR}"
+                            "$<TARGET_BUNDLE_DIR:spikeout-interp>/spikeofe.zip"
+                        COMMENT "Bundling spikeofe.zip into the iOS app")
+                endif()
+            endif()
+        endif()
     endif()
 endif()
 

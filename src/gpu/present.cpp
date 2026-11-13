@@ -109,15 +109,29 @@ SDL_GPUShader* Device::shader(const ShaderCode& code, Stage stage, const Resourc
 
 namespace {
 
-SDL_GPUGraphicsPipeline* fullscreen_pipeline(Device& device, const ShaderCode& fragment, uint32_t samplers) {
+SDL_GPUGraphicsPipeline* fullscreen_pipeline(Device& device, const ShaderCode& fragment, uint32_t samplers,
+                                             bool alpha_blend = false, bool uniform = true) {
     SDL_GPUDevice* d = device.get();
     SDL_GPUShader* vs = device.shader(shaders::present_vert, Device::Stage::Vertex, {});
-    SDL_GPUShader* fs = device.shader(fragment, Device::Stage::Fragment, {.samplers = samplers, .uniform_buffers = 1});
+    SDL_GPUShader* fs =
+        device.shader(fragment, Device::Stage::Fragment,
+                      {.samplers = samplers, .uniform_buffers = uniform ? 1u : 0u});
     SDL_GPUGraphicsPipeline* pipeline = nullptr;
     if (vs && fs) {
         SDL_GPUColorTargetDescription target{};
         target.format = device.window() ? SDL_GetGPUSwapchainTextureFormat(d, device.window())
                                         : SDL_GPU_TEXTUREFORMAT_B8G8R8A8_UNORM; // headless: Presenter::set_target's
+        if (alpha_blend) {
+            target.blend_state.enable_blend = true;
+            target.blend_state.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA;
+            target.blend_state.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+            target.blend_state.color_blend_op = SDL_GPU_BLENDOP_ADD;
+            target.blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+            target.blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA;
+            target.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+            target.blend_state.color_write_mask = SDL_GPU_COLORCOMPONENT_R | SDL_GPU_COLORCOMPONENT_G |
+                                                 SDL_GPU_COLORCOMPONENT_B | SDL_GPU_COLORCOMPONENT_A;
+        }
         SDL_GPUGraphicsPipelineCreateInfo info{};
         info.vertex_shader = vs;
         info.fragment_shader = fs;
@@ -201,10 +215,59 @@ void Presenter::set_look(int crt_colours, int filter) {
     filter_ = std::clamp(filter, 0, 2);
 }
 
+void Presenter::draw_overlay_rgba(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* swapchain, uint32_t sw, uint32_t sh,
+                                  std::span<const uint32_t> pixels, int width, int height) {
+    if (!device_ || !overlay_pipeline_ || !sampler_ || !swapchain || width <= 0 || height <= 0) return;
+    if (pixels.size() < static_cast<std::size_t>(width) * static_cast<std::size_t>(height)) return;
+    SDL_GPUDevice* d = device_->get();
+    if (width != overlay_w_ || height != overlay_h_ || !overlay_tex_ || !overlay_upload_) {
+        if (overlay_tex_) SDL_ReleaseGPUTexture(d, overlay_tex_);
+        if (overlay_upload_) SDL_ReleaseGPUTransferBuffer(d, overlay_upload_);
+        overlay_tex_ = frame_texture(d, width, height);
+        SDL_GPUTransferBufferCreateInfo buf{};
+        buf.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
+        buf.size = static_cast<Uint32>(width * height * 4);
+        overlay_upload_ = SDL_CreateGPUTransferBuffer(d, &buf);
+        overlay_w_ = width;
+        overlay_h_ = height;
+        if (!overlay_tex_ || !overlay_upload_) return;
+    }
+    auto* p = static_cast<uint8_t*>(SDL_MapGPUTransferBuffer(d, overlay_upload_, true));
+    if (!p) return;
+    std::memcpy(p, pixels.data(), static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4);
+    SDL_UnmapGPUTransferBuffer(d, overlay_upload_);
+    SDL_GPUCopyPass* copy = SDL_BeginGPUCopyPass(cmd);
+    SDL_GPUTextureTransferInfo from{};
+    from.transfer_buffer = overlay_upload_;
+    SDL_GPUTextureRegion to{};
+    to.texture = overlay_tex_;
+    to.w = static_cast<Uint32>(width);
+    to.h = static_cast<Uint32>(height);
+    to.d = 1;
+    SDL_UploadToGPUTexture(copy, &from, &to, true);
+    SDL_EndGPUCopyPass(copy);
+
+    SDL_GPUColorTargetInfo colour{};
+    colour.texture = swapchain;
+    colour.load_op = SDL_GPU_LOADOP_LOAD;
+    colour.store_op = SDL_GPU_STOREOP_STORE;
+    SDL_GPURenderPass* pass = SDL_BeginGPURenderPass(cmd, &colour, 1, nullptr);
+    SDL_BindGPUGraphicsPipeline(pass, overlay_pipeline_);
+    SDL_GPUTextureSamplerBinding bind{overlay_tex_, sampler_};
+    SDL_BindGPUFragmentSamplers(pass, 0, &bind, 1);
+    SDL_GPUViewport view{0, 0, static_cast<float>(sw), static_cast<float>(sh), 0, 1};
+    SDL_SetGPUViewport(pass, &view);
+    SDL_DrawGPUPrimitives(pass, 3, 1, 0, 0);
+    SDL_EndGPURenderPass(pass);
+    (void)sw;
+    (void)sh;
+}
+
 bool Presenter::open(Device& device) {
     device_ = &device;
     pipeline_ = fullscreen_pipeline(device, shaders::present_frag, 1);
     screen_pipeline_ = fullscreen_pipeline(device, shaders::screen_frag, 3);
+    overlay_pipeline_ = fullscreen_pipeline(device, shaders::overlay_frag, 1, true, false);
     SDL_GPUSamplerCreateInfo sampler{};
     sampler.min_filter = SDL_GPU_FILTER_NEAREST;
     sampler.mag_filter = SDL_GPU_FILTER_NEAREST;
@@ -216,20 +279,22 @@ bool Presenter::open(Device& device) {
     sampler.min_filter = sampler.mag_filter = SDL_GPU_FILTER_LINEAR;
     sampler.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_LINEAR;
     smooth_ = SDL_CreateGPUSampler(device.get(), &sampler);
-    return pipeline_ && screen_pipeline_ && sampler_ && smooth_;
+    return pipeline_ && screen_pipeline_ && overlay_pipeline_ && sampler_ && smooth_;
 }
 
 Presenter::~Presenter() {
     if (!device_ || !device_->get()) return;
     SDL_GPUDevice* d = device_->get();
     SDL_WaitForGPUIdle(d);
-    for (SDL_GPUGraphicsPipeline* p : {pipeline_, screen_pipeline_})
+    for (SDL_GPUGraphicsPipeline* p : {pipeline_, screen_pipeline_, overlay_pipeline_})
         if (p) SDL_ReleaseGPUGraphicsPipeline(d, p);
     for (SDL_GPUSampler* s : {sampler_, smooth_})
         if (s) SDL_ReleaseGPUSampler(d, s);
     for (SDL_GPUTexture* t : textures_)
         if (t) SDL_ReleaseGPUTexture(d, t);
+    if (overlay_tex_) SDL_ReleaseGPUTexture(d, overlay_tex_);
     if (upload_) SDL_ReleaseGPUTransferBuffer(d, upload_);
+    if (overlay_upload_) SDL_ReleaseGPUTransferBuffer(d, overlay_upload_);
 }
 
 // Room for two frames of this size: textures_ 0 and 1, and their upload.

@@ -110,9 +110,13 @@
 #include "pad_layouts.hpp"   // (layouts for pads and sticks SDL has none for: the community database, a generic one)
 #include "net_record.hpp"    // (a network game recorded: its state and every seat's inputs, gamerun --net-replay)
 #include "problem_report.hpp" // (problems noticed in network play: a locked bundle each, a hang watchdog)
+#include "touch_controls.hpp" // (on-screen stick and buttons: phones / iOS)
 #include "ui/assets.hpp" // (the app's icon)
 #ifdef SPIKEOUT_JIT
 #include "jit/jit.hpp" // (spikeout-jit: the game translated from the ROM set at the first start, LLVM)
+#endif
+#ifdef SPIKEOUT_INTERP
+#include "interp/interp.hpp" // (spikeout-interp: no machine code; for iOS and other no-JIT systems)
 #endif
 #ifdef SPIKEOUT_GPU
 #include "gpu/present.hpp"
@@ -130,6 +134,9 @@
 #define NOMINMAX
 #endif
 #include <windows.h> // (the console: main)
+#endif
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
 #endif
 
 #include <algorithm>
@@ -545,7 +552,7 @@ std::string pad_input_name(int code, SDL_Gamepad* pad) {
 // Keys and pads to the I/O boards' input bytes (bits clear while pressed):
 // player 1's onto board `focus`, player 2's onto board 1 when there is one.
 void read_inputs(Shared& shared, std::size_t focus, const tools::Settings& settings, const std::array<SDL_Gamepad*, 2>& pads,
-                 bool test, bool service) {
+                 bool test, bool service, const std::array<bool, tools::kActions>* touch = nullptr) {
     const bool* k = SDL_GetKeyboardState(nullptr);
     for (Screen& s : shared.screens) {
         s.bank0 = 0xFF;
@@ -557,7 +564,8 @@ void read_inputs(Shared& shared, std::size_t focus, const tools::Settings& setti
         uint8_t bank0 = s.bank0, controls = s.controls;
         for (std::size_t a = 0; a < tools::kActions; ++a) {
             const int key = settings.keys[player][a];
-            if (!(held[a] || (key > 0 && k[key]))) continue;
+            const bool finger = touch && player == 0 && (*touch)[a];
+            if (!(held[a] || (key > 0 && k[key]) || finger)) continue;
             if (kActionBits[a].bank0) bank0 = static_cast<uint8_t>(bank0 & ~(1u << kActionBits[a].bit));
             else controls = static_cast<uint8_t>(controls & ~(1u << kActionBits[a].bit));
         }
@@ -1651,6 +1659,7 @@ void set_up_one_board(Shared& shared) {
 // No GPU (the owner's choice, 2026-11-02: such a device doesn't run the game): said in the window in the menu's
 // colours, drawn with SDL's 2D renderer (the menu itself needs the GPU) in its built-in 8x8 font, in plain words (the
 // technical reason only in the log); until a key, a button or the window closed.
+#if !defined(__IPHONEOS__) && !(defined(TARGET_OS_IOS) && TARGET_OS_IOS)
 void show_no_gpu(SDL_Window* window) {
     SDL_Renderer* r = SDL_CreateRenderer(window, nullptr);
     if (!r) {
@@ -1684,6 +1693,7 @@ void show_no_gpu(SDL_Window* window) {
     }
     SDL_DestroyRenderer(r);
 }
+#endif
 
 // Paths from and to UTF-8 (settings.ini, SDL's dialogs).
 std::filesystem::path utf8_path(const std::string& s) {
@@ -1799,8 +1809,8 @@ public:
         SDL_RenderPresent(r_);
     }
 
-    // The JIT build's first start: the game being translated from the ROM set, how far (a share, 0-1) and what
-    // it's doing; once only, later starts load it.
+    // The JIT/interp build's first start: the game prepared from the ROM set, how far (a share, 0-1) and what
+    // it's doing; once only for the JIT (cached later), every start for the interpreter (~1 s).
     void preparing(float share, const std::string& doing) {
         if (!r_ && !open()) return;
         clear();
@@ -1808,8 +1818,13 @@ public:
         SDL_GetRenderOutputSize(r_, &w, &h);
         const float small = h < 600 ? 1.0f : 2.0f;
         line("PREPARING THE GAME", 0.30f, small * 2, kTitle);
+#ifdef SPIKEOUT_INTERP
+        line("Reading the game from your ROM set.", 0.42f, small, kText);
+        line("A moment while it is prepared.", 0.47f, small, kText);
+#else
         line("Translating the game from your ROM set.", 0.42f, small, kText);
         line("This happens on the first start only.", 0.47f, small, kText);
+#endif
         const float bw = static_cast<float>(w) * 0.6f, bh = 12 * small;
         const SDL_FRect frame{(static_cast<float>(w) - bw) / 2, static_cast<float>(h) * 0.56f, bw, bh};
         SDL_FRect bar{frame.x + 2, frame.y + 2, (frame.w - 4) * std::clamp(share, 0.0f, 1.0f), frame.h - 4};
@@ -1855,8 +1870,13 @@ private:
         SDL_GetRenderOutputSize(r_, &w, &h);
         const float small = h < 600 ? 1.0f : 2.0f;
         line("CHOOSE THE ROM SET", 0.22f, small * 2, kTitle);
+#if defined(__IPHONEOS__) || (defined(TARGET_OS_IOS) && TARGET_OS_IOS)
+        line("Put spikeofe.zip in this app's Files folder,", 0.36f, small, kText);
+        line("or rebuild with tools/ios-build.sh --rom DIR.", 0.41f, small, kText);
+#else
         line("Spikeout needs the arcade's ROM set,", 0.36f, small, kText);
         line("spikeofe.zip, as MAME and Supermodel have it.", 0.41f, small, kText);
+#endif
         if (!why.empty()) line(why, 0.48f, small, kProblem);
         static const char* kLabels[kButtons] = {"Choose the zip file", "Quit"};
         for (int i = 0; i < kButtons; ++i) {
@@ -1870,7 +1890,11 @@ private:
             }
         }
         if (dialog_open_) line("Choose it in the window that opened.", 0.86f, small, kText);
+#if defined(__IPHONEOS__) || (defined(TARGET_OS_IOS) && TARGET_OS_IOS)
+        else line("Tap Choose, or Quit", 0.86f, small, kText);
+#else
         else line("Arrows and Enter, a pad, or the mouse", 0.86f, small, kText);
+#endif
         SDL_RenderPresent(r_);
     }
     // The system's dialog (its answer comes on another thread: take_picked).
@@ -2211,8 +2235,14 @@ int main(int argc, char** argv) {
     start_step("making the window");
     if (test_start_hang > 0) std::this_thread::sleep_for(std::chrono::seconds(test_start_hang));
     // (hidden until the ROM set is read, as before it was made after; shown at once if one must be chosen)
+#if defined(__IPHONEOS__) || (defined(TARGET_OS_IOS) && TARGET_OS_IOS)
+    // iOS: one full-screen window (SDL maps HIGH_PIXEL_DENSITY to the device scale).
+    SDL_Window* window = SDL_CreateWindow("Spikeout: Final Edition", 0, 0,
+                                          SDL_WINDOW_FULLSCREEN | SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_HIDDEN);
+#else
     SDL_Window* window =
         SDL_CreateWindow("Spikeout: Final Edition", width * scale, height * scale, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN);
+#endif
     if (!window) {
         std::fprintf(stderr, "spikeout: %s\n", SDL_GetError());
         return 1;
@@ -2232,6 +2262,39 @@ int main(int argc, char** argv) {
     {
         const bool given = dir != nullptr;
         std::filesystem::path rom_path = given ? std::filesystem::path(dir) : utf8_path(settings.rom_path);
+#if defined(__IPHONEOS__) || (defined(TARGET_OS_IOS) && TARGET_OS_IOS)
+        // iOS: no desktop folder browse. Look in Documents (Files / Finder sharing), the pref path, then the
+        // app bundle. The player's own dump only. A saved path from an older install (different container UUID)
+        // is ignored when it is gone.
+        {
+            auto try_rom = [&](const std::filesystem::path& p) {
+                if (p.empty() || !std::filesystem::exists(p)) return false;
+                if (rom_problem(p).empty()) {
+                    rom_path = p;
+                    return true;
+                }
+                return false;
+            };
+            auto try_dir = [&](const std::filesystem::path& dir) {
+                return try_rom(dir / "spikeofe.zip") || try_rom(dir / "spikeofe");
+            };
+            if (rom_path.empty() || !std::filesystem::exists(rom_path) || !rom_problem(rom_path).empty()) {
+                rom_path.clear();
+                if (const char* docs = SDL_GetUserFolder(SDL_FOLDER_DOCUMENTS)) {
+                    try_dir(docs); // (SDL owns this string; do not free)
+                }
+                if (rom_path.empty()) {
+                    if (char* pref = SDL_GetPrefPath("spikeout-recomp", "Spikeout")) {
+                        try_dir(pref);
+                        SDL_free(pref);
+                    }
+                }
+                if (rom_path.empty()) {
+                    if (const char* base = SDL_GetBasePath()) try_dir(base);
+                }
+            }
+        }
+#endif
         RomScreen screen(window);
         std::string why;
         for (bool chosen = false;; chosen = true) {
@@ -2352,6 +2415,47 @@ int main(int argc, char** argv) {
             return 1;
         }
 #endif
+#ifdef SPIKEOUT_INTERP
+        // Pre-decoded interpreter: analysis + decode once (~1 s), no machine code (iOS / App Store).
+        std::atomic<bool> finished{false};
+        std::string error;
+        start_step("preparing the game (interpreter)");
+        watchdog.set_step("preparing the game (interpreter)", kStartSeconds);
+        std::thread worker([&] {
+            tools::report::name_thread("the game's interpreter");
+            try {
+                interp::prepare(m3::games::kSpikeoutFinalEdition, roms, false);
+            } catch (const std::exception& e) {
+                error = e.what();
+            }
+            finished = true;
+        });
+        const auto began = std::chrono::steady_clock::now();
+        bool quit = false;
+        while (!finished) {
+            for (SDL_Event e; SDL_PollEvent(&e);)
+                if (e.type == SDL_EVENT_QUIT || e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) quit = true;
+            if (!quit && std::chrono::steady_clock::now() - began > std::chrono::milliseconds(100))
+                screen.preparing(0.55f, "Reading the game's code...");
+            SDL_Delay(16);
+        }
+        worker.join();
+        if (quit) {
+            screen.close();
+            SDL_DestroyWindow(window);
+            SDL_Quit();
+            return 0;
+        }
+        if (!error.empty()) {
+            std::fprintf(stderr, "spikeout: the game couldn't be prepared: %s\n", error.c_str());
+            const std::string text = "The game couldn't be prepared from the ROM set:\n" + error;
+            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Spikeout", text.c_str(), window);
+            screen.close();
+            SDL_DestroyWindow(window);
+            SDL_Quit();
+            return 1;
+        }
+#endif
         start_step("closing the start screen");
         screen.close(); // (the window given to the GPU)
     }
@@ -2375,8 +2479,14 @@ int main(int argc, char** argv) {
             std::printf("spikeout: no GPU (%s)\n", why.c_str());
             presenter.reset(); // (the window given back, for SDL's 2D renderer)
             gpu_device.reset();
+#if defined(__IPHONEOS__) || (defined(TARGET_OS_IOS) && TARGET_OS_IOS)
+            // iOS Simulator's Metal often fails SDL_GPU's Apple3 check; a real iPhone uses Metal.
+            // Fall back to the software picture so sideload / Simulator still runs.
+            std::printf("spikeout: drawing without the GPU (software; fine on Simulator)\n");
+#else
             show_no_gpu(window);
             return 1;
+#endif
         }
     }
 #else
@@ -2556,22 +2666,46 @@ int main(int argc, char** argv) {
         return screen;
     };
 
+    // On-screen touch controls (iOS / SPIKEOUT_TOUCH=1): stick + cabinet buttons + menu.
+    tools::TouchControls touch;
+#if defined(__IPHONEOS__) || (defined(TARGET_OS_IOS) && TARGET_OS_IOS)
+    const bool want_touch = true;
+#else
+    const bool want_touch = std::getenv("SPIKEOUT_TOUCH") != nullptr;
+#endif
+    touch.set_enabled(want_touch);
+    std::vector<uint32_t> touch_rgba;
+    if (want_touch) std::printf("spikeout: on-screen touch controls on\n");
+
     // The menu, over the picture.
     ui::Menu menu;
     bool menu_ready = false;
     if (on_gpu) {
         menu_ready = menu.init(gpu_device->get(), window);
-        if (menu_ready) {
-            menu.set_footer(std::string("Spikeout: Final Edition recomp ") + net::kVersion);
-            presenter->overlay = [&](SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* swapchain, uint32_t w, uint32_t h) {
-                menu.render(cmd, swapchain, w, h);
-            };
-        } else {
-            std::printf("spikeout: no menu (%s)\n", menu.error().c_str());
-        }
+        if (menu_ready) menu.set_footer(std::string("Spikeout: Final Edition recomp ") + net::kVersion);
+        else std::printf("spikeout: no menu (%s)\n", menu.error().c_str());
+        presenter->overlay = [&](SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* swapchain, uint32_t w, uint32_t h) {
+            if (menu_ready) menu.render(cmd, swapchain, w, h);
+            if (touch.enabled()) {
+                touch.layout_for(static_cast<int>(w), static_cast<int>(h));
+                if (touch.dirty() || touch_rgba.size() != static_cast<std::size_t>(w) * h) {
+                    touch.paint_rgba(touch_rgba, static_cast<int>(w), static_cast<int>(h));
+                    touch.clear_dirty();
+                }
+                presenter->draw_overlay_rgba(cmd, swapchain, w, h, touch_rgba, static_cast<int>(w), static_cast<int>(h));
+            }
+        };
     }
 #else
     const bool menu_ready = false;
+    tools::TouchControls touch;
+#if defined(__IPHONEOS__) || (defined(TARGET_OS_IOS) && TARGET_OS_IOS)
+    const bool want_touch = true;
+#else
+    const bool want_touch = std::getenv("SPIKEOUT_TOUCH") != nullptr;
+#endif
+    touch.set_enabled(want_touch);
+    if (want_touch) std::printf("spikeout: on-screen touch controls on\n");
 #endif
 
     std::unique_ptr<m3::LinkRing> ring;
@@ -4494,7 +4628,9 @@ int main(int argc, char** argv) {
                     SDL_DelayPrecise(static_cast<Uint64>(wait));
                     SDL_PumpEvents();
                     const auto at = std::chrono::steady_clock::now();
-                    read_inputs(shared, focus, settings, player_pads(), at < test_until, at < service_until);
+                    const auto touch_held = touch.enabled() ? touch.held() : std::array<bool, tools::kActions>{};
+                    read_inputs(shared, focus, settings, player_pads(), at < test_until, at < service_until,
+                                touch.enabled() ? &touch_held : nullptr);
                 }
             }
             std::unique_lock<std::mutex> guard(shared.lock);
@@ -4564,6 +4700,35 @@ int main(int argc, char** argv) {
                         gamepads.erase(it);
                         break;
                     }
+            }
+            // Touch / mouse on the virtual stick and buttons (eaten so the menu doesn't see them as clicks).
+            if (touch.enabled()) {
+                int wx = 1, wy = 1, px = 1, py = 1;
+                SDL_GetWindowSize(window, &wx, &wy);
+                SDL_GetWindowSizeInPixels(window, &px, &py);
+                touch.layout_for(px, py);
+                SDL_Event te = e;
+                auto to_px = [&](float& x, float& y) {
+                    if (wx > 0 && wy > 0) {
+                        x = x * static_cast<float>(px) / static_cast<float>(wx);
+                        y = y * static_cast<float>(py) / static_cast<float>(wy);
+                    }
+                };
+                if (te.type == SDL_EVENT_MOUSE_BUTTON_DOWN || te.type == SDL_EVENT_MOUSE_BUTTON_UP)
+                    to_px(te.button.x, te.button.y);
+                else if (te.type == SDL_EVENT_MOUSE_MOTION) to_px(te.motion.x, te.motion.y);
+                if (touch.handle_event(te)) {
+#ifdef SPIKEOUT_GPU
+                    if (touch.menu_pressed()) {
+                        touch.clear_menu_edge();
+                        if (menu_ready && menu.is_open()) menu.close();
+                        else open_menu();
+                    }
+#else
+                    touch.clear_menu_edge();
+#endif
+                    continue;
+                }
             }
 #ifdef SPIKEOUT_GPU
             // (the Controls page open: what each controller sends, as it changes, in the log: the controller's own
@@ -4822,7 +4987,18 @@ int main(int argc, char** argv) {
         }
 #endif
         const auto now = std::chrono::steady_clock::now();
-        read_inputs(shared, focus, settings, player_pads(), now < test_until, now < service_until);
+#ifdef SPIKEOUT_GPU
+        // Hide the stick while the menu is up (Resume / Esc closes it); keep layout sized to the window.
+        touch.set_enabled(want_touch && !(menu_ready && menu.is_open()));
+#endif
+        {
+            int pw = 0, ph = 0;
+            SDL_GetWindowSizeInPixels(window, &pw, &ph);
+            if (pw > 0 && ph > 0) touch.layout_for(pw, ph);
+        }
+        const auto touch_held = touch.enabled() ? touch.held() : std::array<bool, tools::kActions>{};
+        read_inputs(shared, focus, settings, player_pads(), now < test_until, now < service_until,
+                    touch.enabled() ? &touch_held : nullptr);
         // Network play: the game, as it gathers its players, starts; the
         // lobby told of players joining; the menu's lobby page kept up to
         // date; the controls let go while the menu is open (the game goes on).
@@ -5522,6 +5698,14 @@ int main(int argc, char** argv) {
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         SDL_RenderClear(renderer);
         SDL_RenderTexture(renderer, texture, nullptr, nullptr);
+        if (touch.enabled()) {
+            SDL_SetRenderScale(renderer, 1, 1);
+            int rw = 0, rh = 0;
+            SDL_GetRenderOutputSize(renderer, &rw, &rh);
+            touch.layout_for(rw, rh);
+            SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+            touch.draw_sdl(renderer);
+        }
         SDL_RenderPresent(renderer);
     }
 
