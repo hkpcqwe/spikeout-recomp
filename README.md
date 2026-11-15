@@ -122,15 +122,6 @@ time.
   <a href="https://buymeacoffee.com/hkpcqwe"><img alt="Buy me a coffee" src="https://img.shields.io/badge/Buy%20me%20a%20coffee-hkpcqwe-FFDD00?style=for-the-badge&logo=buymeacoffee&logoColor=black"></a>
 </p>
 
-**Set up your own Buy Me a Coffee page (one-time):**
-
-1. Open [buymeacoffee.com/signup](https://buymeacoffee.com/signup) and pick a username (this README uses `hkpcqwe` —
-   change the links if you choose another).
-2. Confirm email, add a short bio (e.g. “Spikeout on iPhone — sideload builds”).
-3. Connect **payouts** (Stripe) — the page stays hidden until payout is set.
-4. Share `https://buymeacoffee.com/YOUR_USERNAME`. GitHub also shows a **Sponsor** / funding link from
-   [`.github/FUNDING.yml`](.github/FUNDING.yml).
-
 Also helps: star the repo, report bugs, and tell others to bring their own ROM.
 
 ## Licence and credit
