@@ -662,20 +662,26 @@ if(SPIKEOUT_INTERP)
             # (SPIKEOUT_IOS_ROM_DIR). Never commit ROM data; App Store builds leave this empty.
             set(SPIKEOUT_IOS_ROM_DIR "" CACHE PATH "Optional spikeofe folder/zip copied into the iOS app Resources")
             if(SPIKEOUT_IOS_ROM_DIR)
-                # TARGET_FILE_DIR is the .app root on iOS (PRODUCT_NAME may differ from the target name).
-                # TARGET_BUNDLE_DIR follows PRODUCT_NAME (Spikeout.app); TARGET_FILE_DIR
-                # can wrongly expand to spikeout-interp.app under the Xcode generator.
+                # Xcode sets PRODUCT_NAME to Spikeout, but $<TARGET_BUNDLE_DIR> often
+                # still expands to spikeout-interp.app. Always also copy into the
+                # sibling Spikeout.app that codesign / install actually use.
                 if(IS_DIRECTORY "${SPIKEOUT_IOS_ROM_DIR}")
                     add_custom_command(TARGET spikeout-interp POST_BUILD
                         COMMAND ${CMAKE_COMMAND} -E copy_directory
                             "${SPIKEOUT_IOS_ROM_DIR}"
                             "$<TARGET_BUNDLE_DIR:spikeout-interp>/spikeofe"
+                        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                            "${SPIKEOUT_IOS_ROM_DIR}"
+                            "$<TARGET_BUNDLE_DIR:spikeout-interp>/../Spikeout.app/spikeofe"
                         COMMENT "Bundling spikeofe ROM folder into the iOS app")
                 else()
                     add_custom_command(TARGET spikeout-interp POST_BUILD
                         COMMAND ${CMAKE_COMMAND} -E copy
                             "${SPIKEOUT_IOS_ROM_DIR}"
                             "$<TARGET_BUNDLE_DIR:spikeout-interp>/spikeofe.zip"
+                        COMMAND ${CMAKE_COMMAND} -E copy
+                            "${SPIKEOUT_IOS_ROM_DIR}"
+                            "$<TARGET_BUNDLE_DIR:spikeout-interp>/../Spikeout.app/spikeofe.zip"
                         COMMENT "Bundling spikeofe.zip into the iOS app")
                 endif()
             endif()

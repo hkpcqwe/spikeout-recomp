@@ -160,6 +160,11 @@ private:
     void click_change(int d);
     void activate();
     void clear();
+    // Pointer in the menu's pixel space (same as last render / SetDimensions).
+    // Used for iOS fingers: RmlUi's Click path often misses on touch, so hit the
+    // row (or on-screen key) by geometry and activate it directly.
+    bool tap_at(float x, float y);
+    void pointer_to_view(float win_x, float win_y, float& out_x, float& out_y) const;
     // A code page (MenuPage::code).
     void build_code();
     bool code_event(const SDL_Event& e);
@@ -183,6 +188,7 @@ private:
     int selected_ = 0;
     int stick_x_ = 0, stick_y_ = 0; // the left stick's last direction, for its edges
     bool mouse_moved_ = false;      // the mouse moved since the last key or button (a code page: it selects)
+    int view_w_ = 0, view_h_ = 0;   // last swapchain size the menu was drawn at
     std::function<bool(const SDL_Event&)> capture_;
     std::string capture_prompt_;
 };

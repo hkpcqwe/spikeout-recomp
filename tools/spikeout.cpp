@@ -2134,6 +2134,11 @@ int main(int argc, char** argv) {
     tools::report::catch_crashes(report_folder, net::kVersion);
     tools::report::name_thread("the window (its main thread)");
     const std::string last_crash = tools::report::last_crash(report_folder);
+#if defined(__IPHONEOS__) || (defined(TARGET_OS_IOS) && TARGET_OS_IOS)
+    // Real taps are fingers. Don't also synthesize mouse clicks (would double-
+    // activate menu rows). Simulator still sends real mouse events.
+    SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
+#endif
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD)) {
         std::fprintf(stderr, "spikeout: SDL_Init: %s\n", SDL_GetError());
         return 1;
@@ -2232,13 +2237,57 @@ int main(int argc, char** argv) {
     const bool test_run = max_frames != 0; // (writes no settings)
     const bool report_test = std::getenv("SPIKEOUT_TEST_REPORTS") != nullptr; // (tests: reports sent in a --frames run too)
 
+#if defined(__IPHONEOS__) || (defined(TARGET_OS_IOS) && TARGET_OS_IOS)
+    // iPhone / iPad: pin the cheapest durable picture. Auto Retina scale + AA +
+    // quads-as-whole previously made A13-class devices crawl while Simulator
+    // (Mac GPU) stayed smooth. Rewrite settings.ini so a prior desktop-quality
+    // file on the device cannot keep the phone slow.
+    {
+        bool ios_perf = false;
+        if (settings.render_scale == 0 || settings.render_scale > 1) {
+            settings.render_scale = 1;
+            ios_perf = true;
+        }
+        if (settings.antialiasing != 1) {
+            settings.antialiasing = 1;
+            ios_perf = true;
+        }
+        if (settings.quads) {
+            settings.quads = false;
+            ios_perf = true;
+        }
+        if (settings.picture_shape != 0) {
+            settings.picture_shape = 0;
+            ios_perf = true;
+        }
+        if (settings.crt_colours != 0) {
+            settings.crt_colours = 0;
+            ios_perf = true;
+        }
+        if (settings.screen_filter != 0) {
+            settings.screen_filter = 0;
+            ios_perf = true;
+        }
+        if (!settings.show_fps) {
+            settings.show_fps = true;
+            ios_perf = true;
+        }
+        if (ios_perf) {
+            std::printf("spikeout: iOS perf settings (scale 1, no AA, arcade, no quads)\n");
+            if (!test_run) tools::save_settings(settings_path, settings);
+        }
+    }
+#endif
+
     start_step("making the window");
     if (test_start_hang > 0) std::this_thread::sleep_for(std::chrono::seconds(test_start_hang));
     // (hidden until the ROM set is read, as before it was made after; shown at once if one must be chosen)
 #if defined(__IPHONEOS__) || (defined(TARGET_OS_IOS) && TARGET_OS_IOS)
-    // iOS: one full-screen window (SDL maps HIGH_PIXEL_DENSITY to the device scale).
+    // Prefer logical points (no HIGH_PIXEL_DENSITY) so the swapchain and touch
+    // overlay stay near ~900×400 instead of 3× Retina — present + overlay paint
+    // cost drops a lot on iPhone 11. Desktop keeps a normal resizable window.
     SDL_Window* window = SDL_CreateWindow("Spikeout: Final Edition", 0, 0,
-                                          SDL_WINDOW_FULLSCREEN | SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_HIDDEN);
+                                          SDL_WINDOW_FULLSCREEN | SDL_WINDOW_HIDDEN);
 #else
     SDL_Window* window =
         SDL_CreateWindow("Spikeout: Final Edition", width * scale, height * scale, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN);
@@ -2574,7 +2623,14 @@ int main(int argc, char** argv) {
             SDL_GetWindowSizeInPixels(window, &pw, &ph);
             const double fit = std::min(static_cast<double>(pw) / kWidth, static_cast<double>(ph) / kHeight);
             base = std::clamp(static_cast<int>(std::ceil(fit - 0.05)), 1, 6);
+#if defined(__IPHONEOS__) || (defined(TARGET_OS_IOS) && TARGET_OS_IOS)
+            // Retina windows make Auto pick 3+; keep Auto at 1× on iOS.
+            if (base > 1) base = 1;
+#endif
         }
+#if defined(__IPHONEOS__) || (defined(TARGET_OS_IOS) && TARGET_OS_IOS)
+        if (base > 2) base = 2;
+#endif
         return std::clamp(base * settings.antialiasing, 1, 8);
     };
     // Widescreen: the screen pixels the gameplay's 3D is opened out each side
@@ -4988,17 +5044,21 @@ int main(int argc, char** argv) {
 #endif
         const auto now = std::chrono::steady_clock::now();
 #ifdef SPIKEOUT_GPU
-        // Hide the stick while the menu is up (Resume / Esc closes it); keep layout sized to the window.
-        touch.set_enabled(want_touch && !(menu_ready && menu.is_open()));
+        // Menu open: keep the MENU button (to close), hide stick/cabinet keys so
+        // taps reach the menu. Fully disabling touch made iOS lose every control.
+        touch.set_enabled(want_touch);
+        touch.set_menu_chrome_only(want_touch && menu_ready && menu.is_open());
 #endif
         {
             int pw = 0, ph = 0;
             SDL_GetWindowSizeInPixels(window, &pw, &ph);
             if (pw > 0 && ph > 0) touch.layout_for(pw, ph);
         }
-        const auto touch_held = touch.enabled() ? touch.held() : std::array<bool, tools::kActions>{};
+        const auto touch_held = touch.enabled() && !touch.menu_chrome_only()
+                                    ? touch.held()
+                                    : std::array<bool, tools::kActions>{};
         read_inputs(shared, focus, settings, player_pads(), now < test_until, now < service_until,
-                    touch.enabled() ? &touch_held : nullptr);
+                    touch.enabled() && !touch.menu_chrome_only() ? &touch_held : nullptr);
         // Network play: the game, as it gathers its players, starts; the
         // lobby told of players joining; the menu's lobby page kept up to
         // date; the controls let go while the menu is open (the game goes on).

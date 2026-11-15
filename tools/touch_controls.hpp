@@ -48,6 +48,20 @@ public:
 
     void set_enabled(bool on) { enabled_ = on; }
     bool enabled() const { return enabled_; }
+    // When the Esc menu is open: keep only the MENU button (to close it) and
+    // let every other tap fall through to the menu's own click handling.
+    void set_menu_chrome_only(bool on) {
+        if (chrome_only_ == on) return;
+        chrome_only_ = on;
+        dirty_ = true;
+        if (on) {
+            for (auto& f : fingers_) f.used = false;
+            held_.fill(false);
+            layout_.knob_x = layout_.stick_x;
+            layout_.knob_y = layout_.stick_y;
+        }
+    }
+    bool menu_chrome_only() const { return chrome_only_; }
     bool menu_pressed() const { return menu_edge_; }
     void clear_menu_edge() { menu_edge_ = false; }
     std::array<bool, kActions> held() const { return held_; }
@@ -136,16 +150,18 @@ public:
             SDL_RenderDebugText(r, cx - tw * 0.5f, cy - SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE * 0.5f, text);
         };
 
-        const bool stick_on = spot_held(Spot::Stick);
-        fill_disk(layout_.stick_x, layout_.stick_y, layout_.stick_r, stick_on ? 90 : 55, 200, 200, 210);
-        stroke_disk(layout_.stick_x, layout_.stick_y, layout_.stick_r, 160, 255, 255, 255);
-        fill_disk(layout_.knob_x, layout_.knob_y, layout_.stick_r * 0.38f, stick_on ? 200 : 140, 255, 211, 74);
+        if (!chrome_only_) {
+            const bool stick_on = spot_held(Spot::Stick);
+            fill_disk(layout_.stick_x, layout_.stick_y, layout_.stick_r, stick_on ? 90 : 55, 200, 200, 210);
+            stroke_disk(layout_.stick_x, layout_.stick_y, layout_.stick_r, 160, 255, 255, 255);
+            fill_disk(layout_.knob_x, layout_.knob_y, layout_.stick_r * 0.38f, stick_on ? 200 : 140, 255, 211, 74);
 
-        for (const auto& b : layout_.buttons) {
-            const bool on = spot_held(b.spot);
-            fill_disk(b.x, b.y, b.r, on ? 160 : 70, on ? 255 : 200, on ? 211 : 200, on ? 74 : 210);
-            stroke_disk(b.x, b.y, b.r, 180, 255, 255, 255);
-            label(b.x, b.y, b.label);
+            for (const auto& b : layout_.buttons) {
+                const bool on = spot_held(b.spot);
+                fill_disk(b.x, b.y, b.r, on ? 160 : 70, on ? 255 : 200, on ? 211 : 200, on ? 74 : 210);
+                stroke_disk(b.x, b.y, b.r, 180, 255, 255, 255);
+                label(b.x, b.y, b.label);
+            }
         }
         {
             const bool on = spot_held(Spot::Menu);
@@ -195,14 +211,16 @@ public:
                 }
         };
 
-        const bool stick_on = spot_held(Spot::Stick);
-        disk(layout_.stick_x, layout_.stick_y, layout_.stick_r, stick_on ? 0x5AC8CCD4u : 0x38C8CCD4u);
-        ring(layout_.stick_x, layout_.stick_y, layout_.stick_r, 0xA0FFFFFFu);
-        disk(layout_.knob_x, layout_.knob_y, layout_.stick_r * 0.38f, stick_on ? 0xC8FFD34Au : 0x8CFFD34Au);
-        for (const auto& b : layout_.buttons) {
-            const bool on = spot_held(b.spot);
-            disk(b.x, b.y, b.r, on ? 0xA0FFD34Au : 0x46C8CCD4u);
-            ring(b.x, b.y, b.r, 0xB4FFFFFFu);
+        if (!chrome_only_) {
+            const bool stick_on = spot_held(Spot::Stick);
+            disk(layout_.stick_x, layout_.stick_y, layout_.stick_r, stick_on ? 0x5AC8CCD4u : 0x38C8CCD4u);
+            ring(layout_.stick_x, layout_.stick_y, layout_.stick_r, 0xA0FFFFFFu);
+            disk(layout_.knob_x, layout_.knob_y, layout_.stick_r * 0.38f, stick_on ? 0xC8FFD34Au : 0x8CFFD34Au);
+            for (const auto& b : layout_.buttons) {
+                const bool on = spot_held(b.spot);
+                disk(b.x, b.y, b.r, on ? 0xA0FFD34Au : 0x46C8CCD4u);
+                ring(b.x, b.y, b.r, 0xB4FFFFFFu);
+            }
         }
         {
             const bool on = spot_held(Spot::Menu);
@@ -222,6 +240,7 @@ private:
     };
 
     bool enabled_ = false;
+    bool chrome_only_ = false;
     bool menu_edge_ = false;
     bool dirty_ = true;
     Layout layout_;
@@ -245,6 +264,7 @@ private:
             return dx * dx + dy * dy <= r * r;
         };
         if (in(layout_.menu.x, layout_.menu.y, layout_.menu.r * 1.15f)) return Spot::Menu;
+        if (chrome_only_) return Spot::Count;
         for (const auto& b : layout_.buttons)
             if (in(b.x, b.y, b.r * 1.25f)) return b.spot;
         if (in(layout_.stick_x, layout_.stick_y, layout_.stick_r * 1.4f)) return Spot::Stick;

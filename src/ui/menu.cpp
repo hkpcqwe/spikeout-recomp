@@ -18,6 +18,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <chrono>
+#include <functional>
 #include <map>
 #include <set>
 
@@ -892,7 +893,10 @@ bool Menu::handle_event(const SDL_Event& e) {
         case SDL_EVENT_GAMEPAD_BUTTON_UP:
         case SDL_EVENT_MOUSE_BUTTON_DOWN:
         case SDL_EVENT_MOUSE_BUTTON_UP:
-        case SDL_EVENT_MOUSE_WHEEL: return true;
+        case SDL_EVENT_MOUSE_WHEEL:
+        case SDL_EVENT_FINGER_DOWN:
+        case SDL_EVENT_FINGER_MOTION:
+        case SDL_EVENT_FINGER_UP: return true;
         default: break;
         }
     }
@@ -958,27 +962,113 @@ bool Menu::handle_event(const SDL_Event& e) {
     }
     case SDL_EVENT_MOUSE_MOTION: {
         mouse_moved_ = true;
-        const float d = SDL_GetWindowPixelDensity(impl_->window);
-        impl_->ctx->ProcessMouseMove(static_cast<int>(e.motion.x * d), static_cast<int>(e.motion.y * d), 0);
+        float mx = 0, my = 0;
+        pointer_to_view(e.motion.x, e.motion.y, mx, my);
+        impl_->ctx->ProcessMouseMove(static_cast<int>(mx), static_cast<int>(my), 0);
         return true;
     }
     case SDL_EVENT_MOUSE_BUTTON_DOWN:
-        if (e.button.button == SDL_BUTTON_LEFT) impl_->ctx->ProcessMouseButtonDown(0, 0);
-        else if (e.button.button == SDL_BUTTON_RIGHT) pop();
+        if (e.button.button == SDL_BUTTON_LEFT) {
+            float mx = 0, my = 0;
+            pointer_to_view(e.button.x, e.button.y, mx, my);
+            impl_->ctx->ProcessMouseMove(static_cast<int>(mx), static_cast<int>(my), 0);
+            impl_->ctx->ProcessMouseButtonDown(0, 0);
+        } else if (e.button.button == SDL_BUTTON_RIGHT) pop();
         return true;
     case SDL_EVENT_MOUSE_BUTTON_UP:
-        if (e.button.button == SDL_BUTTON_LEFT) impl_->ctx->ProcessMouseButtonUp(0, 0);
+        if (e.button.button == SDL_BUTTON_LEFT) {
+            float mx = 0, my = 0;
+            pointer_to_view(e.button.x, e.button.y, mx, my);
+            impl_->ctx->ProcessMouseMove(static_cast<int>(mx), static_cast<int>(my), 0);
+            impl_->ctx->ProcessMouseButtonUp(0, 0);
+        }
         return true;
     case SDL_EVENT_MOUSE_WHEEL:
         if (e.wheel.y != 0) move(e.wheel.y > 0 ? -1 : +1);
         return true;
+    // iOS / phones: hover with move (Mouseover selects the row); activate on
+    // lift by geometry. RmlUi's Click path often never fires after a finger
+    // wobble / scroll-chain reset, so we don't rely on it for fingers.
+    case SDL_EVENT_FINGER_DOWN:
+    case SDL_EVENT_FINGER_MOTION:
+    case SDL_EVENT_FINGER_UP: {
+        mouse_moved_ = true;
+        const int vw = view_w_ > 0 ? view_w_ : impl_->ctx->GetDimensions().x;
+        const int vh = view_h_ > 0 ? view_h_ : impl_->ctx->GetDimensions().y;
+        const float mx = e.tfinger.x * static_cast<float>(std::max(1, vw));
+        const float my = e.tfinger.y * static_cast<float>(std::max(1, vh));
+        impl_->ctx->ProcessMouseMove(static_cast<int>(mx), static_cast<int>(my), 0);
+        if (e.type == SDL_EVENT_FINGER_UP) tap_at(mx, my);
+        return true;
+    }
     default: return false;
     }
 }
 
+void Menu::pointer_to_view(float win_x, float win_y, float& out_x, float& out_y) const {
+    int wx = 0, wy = 0;
+    SDL_GetWindowSize(impl_->window, &wx, &wy);
+    const int vw = view_w_ > 0 ? view_w_ : (impl_->ctx ? impl_->ctx->GetDimensions().x : wx);
+    const int vh = view_h_ > 0 ? view_h_ : (impl_->ctx ? impl_->ctx->GetDimensions().y : wy);
+    out_x = wx > 0 ? win_x * static_cast<float>(vw) / static_cast<float>(wx) : win_x;
+    out_y = wy > 0 ? win_y * static_cast<float>(vh) / static_cast<float>(wy) : win_y;
+}
+
+bool Menu::tap_at(float x, float y) {
+    if (!open_ || !impl_->doc || stack_.empty()) return false;
+    auto inside = [&](Rml::Element* e) {
+        if (!e) return false;
+        const Rml::Vector2f o = e->GetAbsoluteOffset(Rml::BoxArea::Border);
+        const Rml::Vector2f s = e->GetBox().GetSize(Rml::BoxArea::Border);
+        return x >= o.x && y >= o.y && x < o.x + s.x && y < o.y + s.y;
+    };
+    if (stack_.back().code) {
+        // On-screen code keys (join-by-code page).
+        Rml::Element* root = impl_->doc->GetElementById("keys");
+        if (!root) root = impl_->doc;
+        std::function<bool(Rml::Element*)> walk = [&](Rml::Element* e) -> bool {
+            if (!e) return false;
+            if (e->IsClassSet("ckey") && inside(e)) {
+                code_press(std::atoi(e->GetId().c_str() + 1));
+                return true;
+            }
+            for (int i = 0; i < e->GetNumChildren(); ++i)
+                if (walk(e->GetChild(i))) return true;
+            return false;
+        };
+        return walk(root);
+    }
+    Rml::Element* rows = impl_->doc->GetElementById("rows");
+    if (!rows) return false;
+    for (int i = 0; i < rows->GetNumChildren(); ++i) {
+        Rml::Element* e = rows->GetChild(i);
+        if (!e || !e->IsClassSet("row") || e->IsClassSet("info") || !inside(e)) continue;
+        const int idx = std::atoi(e->GetId().c_str() + 1);
+        if (idx < 0 || static_cast<size_t>(idx) >= stack_.back().items.size()) return false;
+        select(idx);
+        const MenuItem& it = stack_.back().items[static_cast<size_t>(idx)];
+        // Value/"<" hit: step the setting; otherwise open / activate the row.
+        Rml::Element* target = e;
+        for (int c = 0; c < e->GetNumChildren(); ++c) {
+            Rml::Element* ch = e->GetChild(c);
+            if (ch && (ch->IsClassSet("back") || ch->IsClassSet("value") || ch->IsClassSet("arrow")) && inside(ch)) {
+                target = ch;
+                break;
+            }
+        }
+        if (it.activate) activate();
+        else if (it.change) click_change(target && target->IsClassSet("back") ? -1 : +1);
+        else activate();
+        return true;
+    }
+    return false;
+}
+
 void Menu::render(SDL_GPUCommandBuffer* cmd, SDL_GPUTexture* swapchain, uint32_t width, uint32_t height) {
     if ((!open_ && !fps_shown_ && !net_shown_ && !loading_shown_ && !banner_shown_ && !cover_shown_) || !impl_->ctx) return;
-    impl_->ctx->SetDimensions(Rml::Vector2i(static_cast<int>(width), static_cast<int>(height)));
+    view_w_ = static_cast<int>(width);
+    view_h_ = static_cast<int>(height);
+    impl_->ctx->SetDimensions(Rml::Vector2i(view_w_, view_h_));
     impl_->ratio = static_cast<float>(height) / 720.0f;
     impl_->ctx->SetDensityIndependentPixelRatio(static_cast<float>(height) / 720.0f);
     impl_->ctx->Update();

@@ -9,7 +9,7 @@ four-player co-op over the internet, one player a PC, as four linked cabinets pl
 <p align="center">
   <a href="https://github.com/tastyrepublic/spikeout-recomp/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/tastyrepublic/spikeout-recomp?include_prereleases&label=release"></a>
   <a href="LICENSE"><img alt="Licence: GPL-3.0" src="https://img.shields.io/badge/licence-GPL--3.0-blue"></a>
-  <img alt="Platforms" src="https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%2F%20Steam%20Deck%20%7C%20macOS-informational">
+  <img alt="Platforms" src="https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%2F%20Steam%20Deck%20%7C%20macOS%20%7C%20iOS%20(sideload)-informational">
   <a href="https://buymeacoffee.com/donfy"><img alt="Buy me a coffee" src="https://img.shields.io/badge/Buy%20me%20a%20coffee-FFDD00?logo=buymeacoffee&logoColor=black"></a>
 </p>
 
@@ -126,6 +126,12 @@ The full guide, step by step (controls, the picture, online play, updating): [do
 2. The app isn't signed: the first time, right-click it and choose Open (or open it, then System Settings > Privacy &
    Security > Open Anyway).
 3. Choose your `spikeofe.zip` when it asks.
+
+**iPhone (build + sideload from a Mac)**
+
+There is no App Store build yet. On a Mac with Xcode you build the interpreter app from source, then install it with
+**Xcode**, **Sideloadly**, **AltStore**, or `devicectl`. Bring your own `spikeofe` ROM; do not share IPAs that contain
+it. Step-by-step: [docs/building-ios.md](docs/building-ios.md).
 
 **Where things are kept:** your settings, the cabinets' settings and rankings, the translated game and the game's
 log (`spikeout.log`) are in your user data folder:
@@ -383,7 +389,10 @@ Every report helps: most of the network fixes so far came from a game that went 
 - A direct cable mode: each PC runs only its own cabinet, the link over your network, for handhelds on one hotspot
 - Maybe direct connections by address
 - The menu in Chinese and Japanese
-- Later: Android, iOS, Xbox, Switch (one player)
+- Later: Android, Xbox, Switch (one player)
+- **iOS (sideload from a Mac):** build the interpreter app yourself and install with
+  Xcode, Sideloadly, AltStore, or `devicectl` — see [Building for iOS](docs/building-ios.md)
+  (bring your own ROM; never ship ROM data)
 
 ## FAQ
 
